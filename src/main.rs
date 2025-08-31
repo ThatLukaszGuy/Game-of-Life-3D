@@ -3,9 +3,11 @@ use bevy::{
     prelude::*,
     window::{CursorGrabMode, PrimaryWindow, WindowFocused},
 };
-use rand::Rng;
 
 pub mod game;
+
+use game::Game;
+use game::RuleSet;
 
 const PROB: f64 = 0.05;
 
@@ -15,21 +17,25 @@ fn main() {
     app.add_systems(Startup, (
         spawn_camera,
         spawn_light,
-        setup_game,
+        setup_game.before(spawn_camera),
         setup_timer
     ));
     app.add_systems(Update, (
         camera_look,
         spawn_cube,
+        focus_events,
+        toggle_grab.run_if(input_just_released(KeyCode::Escape)),
         place_cubes.before(spawn_cube),
         game_step.before(spawn_cube)
     ));
     app.add_event::<CubeSpawn>();
     app.init_resource::<CubeData>();
+    app.add_observer(apply_grab);
     app.run();
 }
 
-// cube spawning logic
+// Cube spawning logic and pipeline of placing, generating cubes and setting all their properties
+
 #[derive(Resource)]
 struct CubeData {
     mesh: Handle<Mesh>,
@@ -70,15 +76,15 @@ impl FromWorld for CubeData {
         }
     }
 }
+
+// used as "tagging" so it can be despawned later
 #[derive(Component)]
 struct LifeCube;
-
 
 #[derive(Event)]
 struct CubeSpawn {
     position: Vec3,
 }
-
 
 fn place_cubes(
     inputs: Res<ButtonInput<MouseButton>>,
@@ -107,7 +113,6 @@ fn place_cubes(
 
 }
 
-
 fn spawn_cube(
     mut events: EventReader<CubeSpawn>,
     mut commands: Commands,
@@ -124,16 +129,21 @@ fn spawn_cube(
 }
 
 
+// Observer/Camera logic and positioning
 
-// observer
 #[derive(Component)]
 struct Observer;
 
-fn spawn_camera(mut commands: Commands) {
+fn spawn_camera(mut commands: Commands, game: Res<Game>) {
+
+    // have camera look roughly at middle of cube structure
+
+    let mid = game.grid.len() as f32 /2.;
+    println!("{}",mid);
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(10.0, 10.0, 20.0)  
-            .looking_at(Vec3::ZERO, Vec3::Y), 
+        Transform::from_xyz(mid, mid, 3.*mid)  
+            .looking_at(Vec3::from_array([mid,mid,mid]), Vec3::Y), 
         Observer,
     ));
 }
@@ -165,8 +175,11 @@ fn camera_look(
     time: Res<Time>,
     window: Single<&Window, With<PrimaryWindow>>,
 ) {
+    if !window.focused {
+        return;
+    }
     // change to use 100. divided by min width and hight, this will make the game feel the same even on different resolutions
-    let sensitivity = 100. / window.width().min(window.height());
+    let sensitivity = 75. / window.width().min(window.height());
 
     // get angles as euler angles because they are more natural then Quats, don't need role
     let (mut yaw, mut pitch, _) = observer.rotation.to_euler(EulerRot::YXZ);
@@ -183,11 +196,19 @@ fn camera_look(
     observer.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.);
 }
 
+
+// Timer and Game state transition logic
+
 #[derive(Resource)]
 struct StepTimer(Timer);
 
 fn setup_timer(mut commands: Commands) {
     commands.insert_resource(StepTimer(Timer::from_seconds(0.5, TimerMode::Repeating)));
+}
+
+fn setup_game(mut commands: Commands) {
+    let game = Game::new(32, PROB, RuleSet::Balanced);
+    commands.insert_resource(game);
 }
 
 fn game_step(
@@ -229,134 +250,32 @@ fn game_step(
     }
 }
 
-// game 
-pub enum RuleSet {
-    Balanced,
-    Dense,
-    Sparse,
-    Chaotic,
-    NoDeath
+// Grab & Focus on Esc key s.t. u can only look iff ur focused
+
+#[derive(Event, Deref)]
+struct GrabEvent(bool);
+
+fn apply_grab(
+    // tells bevy what event to watch for with this observer
+    grab: Trigger<GrabEvent>,
+    mut window: Single<&mut Window, With<PrimaryWindow>>,
+) {
+    if **grab {
+        window.cursor_options.visible = false;
+        window.cursor_options.grab_mode = CursorGrabMode::Locked
+    } else {
+        window.cursor_options.visible = true;
+        window.cursor_options.grab_mode = CursorGrabMode::None;
+    }
 }
 
-#[derive(Resource)]
-struct Game {
-    grid: Vec<Vec<Vec<bool>>>,
-    generation: usize,
-    first_disp: bool,
-    cell_count: usize ,// per dim i.e. for cc = 16 => 16x16x16
-    prob: f64,
-    rule: RuleSet
+fn focus_events(mut events: EventReader<WindowFocused>, mut commands: Commands) {
+    if let Some(event) = events.read().last() {
+        commands.trigger(GrabEvent(event.focused));
+    }
 }
 
-fn setup_game(mut commands: Commands) {
-    let game = Game::new(40, PROB, RuleSet::Balanced);
-    commands.insert_resource(game);
+fn toggle_grab(mut window: Single<&mut Window, With<PrimaryWindow>>, mut commands: Commands) {
+    window.focused = !window.focused;
+    commands.trigger(GrabEvent(window.focused));
 }
-
-
-impl Game {
-
-    fn new(size: usize, prob:f64, rule: RuleSet) -> Game {
-        let mut cell_count = 0;
-        let mut rng = rand::thread_rng();
-
-        if size < 16 { cell_count = 16; } 
-        else { cell_count = size; } 
-        let mut grid:Vec<Vec<Vec<bool>>> = (0..cell_count).map(|_| {
-            (0..cell_count).map(|_| {
-                (0..cell_count).map(|_| rng.gen_bool(prob)).collect() // Prob% chance true/false as alive cells should be rarer initially.collect()
-            }).collect()   
-        }).collect();
-
-        Game {
-            grid,
-            generation: 0,
-            first_disp: true,
-            cell_count,
-            prob,
-            rule
-        }
-    }
-
-    fn reset(&mut self) {
-        let mut rng = rand::thread_rng();
-
-        let mut grid:Vec<Vec<Vec<bool>>> = (0..self.cell_count).map(|_| {
-            (0..self.cell_count).map(|_| {
-                (0..self.cell_count).map(|_| rng.gen_bool(self.prob)).collect() 
-            }).collect()   
-        }).collect();
-
-        self.grid = grid;
-        self.generation = 0;
-        self.first_disp = true;
-    }
-
-    fn advance_state(&mut self) {
-        self.first_disp = false;
-
-        let mut new_grid:Vec<Vec<Vec<bool>>> = (0..self.cell_count).map(|_| {
-            (0..self.cell_count).map(|_| {
-                (0..self.cell_count).map(|_| false).collect() // just init empty vec 3d vec of false
-            }).collect()   
-        }).collect();
-
-        for x in 0..self.grid.len() {
-            for y in 0..self.grid.len() {
-                for z in 0..self.grid.len() {
-                    // to get alive neighbors for each cell
-                    let count = self.count_neighbors(x, y, z);
-                    // balanced impl for now
-                    if self.grid[x][y][z] {
-                        if count >= 5 && count <= 7 { new_grid[x][y][z] = true }
-                    } else {
-                        if count == 6 || count == 5 { new_grid[x][y][z] = true; }
-                    }
-
-                }
-            }
-        };
-
-        self.grid = new_grid;
-        self.generation +=1;
-        //match self.rule {
-        //    RuleSet::Balanced => todo!(),
-        //    RuleSet::Sparse => todo!(),
-        //    RuleSet::Dense => todo!(),
-        //    RuleSet::Chaotic => todo!(),
-        //    RuleSet::NoDeath => todo!()
-        //}
-    }
-
-    fn count_neighbors(&mut self, x:usize,y:usize,z:usize ) -> usize {
-    
-        // enumarate all possible neighbor combinations i.e. 
-        // for cell a at (0,0,0) relative its neighbors 
-        // are in b in {-1,0,1} (all combos => 27-1 = 26)
-        let size = self.grid.len() as isize;
-        let mut count = 0;
-    
-        for dz in -1..=1 {
-            for dy in -1..=1 {
-                for dx in -1..=1 {
-                    if dx == 0 && dy == 0 && dz == 0 {
-                        continue; // skip self
-                    }
-    
-                    let nx = x as isize + dx;
-                    let ny = y as isize + dy;
-                    let nz = z as isize + dz;
-    
-                    if nx >= 0 && nx < size && ny >= 0 && ny < size && nz >= 0 && nz < size {
-                        if self.grid[nx as usize][ny as usize][nz as usize] {
-                            count += 1;
-                        }
-                    }
-                }
-            }
-        }
-        count
-    }
-    
-}
-
