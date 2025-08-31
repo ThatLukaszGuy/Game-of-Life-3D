@@ -17,7 +17,7 @@ pub struct Game {
     pub prob: f64,
     pub rule: RuleSet
 }
-
+// todo : add "custom config" variations that allow spawning in specific structures rather than random generation
 impl Game {
 
     pub fn new(size: usize, prob:f64, rule: RuleSet) -> Game {
@@ -42,7 +42,7 @@ impl Game {
         }
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self,rule: RuleSet) {
         let mut rng = rand::thread_rng();
 
         let mut grid:Vec<Vec<Vec<bool>>> = (0..self.cell_count).map(|_| {
@@ -54,6 +54,7 @@ impl Game {
         self.grid = grid;
         self.generation = 0;
         self.first_disp = true;
+        self.rule = rule;
     }
 
     pub fn advance_state(&mut self) {
@@ -70,27 +71,66 @@ impl Game {
                 for z in 0..self.grid.len() {
                     // to get alive neighbors for each cell
                     let count = self.count_neighbors(x, y, z);
-                    // balanced impl for now
-                    if self.grid[x][y][z] {
-                        if count >= 5 && count <= 7 { new_grid[x][y][z] = true }
-                    } else {
-                        if count == 6 || count == 5 { new_grid[x][y][z] = true; }
+                    
+                    match self.rule {
+                        RuleSet::Balanced => self.balanced(count, &mut new_grid, x,y,z),
+                        RuleSet::Sparse => self.sparse(count, &mut new_grid, x,y,z),
+                        RuleSet::Dense => self.dense(count, &mut new_grid, x,y,z),
+                        RuleSet::Chaotic => self.chaotic(count, &mut new_grid, x,y,z),
+                        RuleSet::NoDeath => self.no_death(count, &mut new_grid, x,y,z)
                     }
-
+                    
                 }
             }
         };
 
         self.grid = new_grid;
         self.generation +=1;
-        //match self.rule {
-        //    RuleSet::Balanced => todo!(),
-        //    RuleSet::Sparse => todo!(),
-        //    RuleSet::Dense => todo!(),
-        //    RuleSet::Chaotic => todo!(),
-        //    RuleSet::NoDeath => todo!()
-        //}
     }
+
+
+    fn balanced(&self, count: usize, g: &mut Vec<Vec<Vec<bool>>>, x:usize,y:usize,z:usize) {
+        if self.grid[x][y][z] {
+            if count >= 5 && count <= 7 { g[x][y][z] = true }
+        } else {
+            if count == 6 || count == 5 {g[x][y][z] = true; }
+        }
+    }
+
+    fn sparse(&self,count: usize, g: &mut Vec<Vec<Vec<bool>>>, x:usize,y:usize,z:usize) {
+        if self.grid[x][y][z] {
+            if count >= 3 && count <= 5 { g[x][y][z] = true }
+        } else {
+            if  count == 5 {g[x][y][z] = true; }
+        }
+    }
+
+    fn dense(&self,count: usize, g: &mut Vec<Vec<Vec<bool>>>, x:usize,y:usize,z:usize) {
+        if self.grid[x][y][z] {
+            if count >= 4 && count <= 9 { g[x][y][z] = true }
+        } else {
+            if count == 6 || count == 5 {g[x][y][z] = true; }
+        }
+    }
+    
+    // todo: find better params
+    fn chaotic(&self,count: usize, g: &mut Vec<Vec<Vec<bool>>>, x:usize,y:usize,z:usize) {
+        if self.grid[x][y][z] {
+            if count >= 5 && count <= 8 { g[x][y][z] = true }
+        } else {
+            if count == 6 || count == 5 {g[x][y][z] = true; }
+        }
+    }
+
+    fn no_death(&self,count: usize, g: &mut Vec<Vec<Vec<bool>>>, x:usize,y:usize,z:usize) {
+        if self.grid[x][y][z] {
+            g[x][y][z] = true // a born cell never dies
+        } else {
+            if count == 5 {g[x][y][z] = true; }
+        }
+    }
+        
+
 
     pub fn count_neighbors(&mut self, x:usize,y:usize,z:usize ) -> usize {
     
@@ -123,4 +163,5 @@ impl Game {
     }
     
 }
+
 

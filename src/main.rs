@@ -9,7 +9,10 @@ pub mod game;
 use game::Game;
 use game::RuleSet;
 
+// for simple experimenting bind all to easily findable constants
 const PROB: f64 = 0.05;
+const SIZE: usize = 50; // above 64 laggy
+const RULE: RuleSet = RuleSet::Sparse;
 
 fn main() {
     let mut app = App::new();
@@ -30,6 +33,7 @@ fn main() {
     ));
     app.add_event::<CubeSpawn>();
     app.init_resource::<CubeData>();
+    app.insert_resource(ClearColor(Color::srgb(0.82353, 0.66667, 0.94902))); //210., 170., 242.
     app.add_observer(apply_grab);
     app.run();
 }
@@ -203,11 +207,11 @@ fn camera_look(
 struct StepTimer(Timer);
 
 fn setup_timer(mut commands: Commands) {
-    commands.insert_resource(StepTimer(Timer::from_seconds(0.5, TimerMode::Repeating)));
+    commands.insert_resource(StepTimer(Timer::from_seconds(0.7, TimerMode::Repeating)));
 }
 
 fn setup_game(mut commands: Commands) {
-    let game = Game::new(32, PROB, RuleSet::Balanced);
+    let game = Game::new(SIZE, PROB, RULE);
     commands.insert_resource(game);
 }
 
