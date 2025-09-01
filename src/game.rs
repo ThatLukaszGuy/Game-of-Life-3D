@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 use rand::Rng;
+
+#[derive(Clone, Copy, PartialEq, PartialOrd,Debug)]
 pub enum RuleSet {
     Balanced,
     Dense,
@@ -26,7 +28,7 @@ impl Game {
 
         if size < 16 { cell_count = 16; } 
         else { cell_count = size; } 
-        let mut grid:Vec<Vec<Vec<bool>>> = (0..cell_count).map(|_| {
+        let grid:Vec<Vec<Vec<bool>>> = (0..cell_count).map(|_| {
             (0..cell_count).map(|_| {
                 (0..cell_count).map(|_| rng.gen_bool(prob)).collect() // Prob% chance true/false as alive cells should be rarer initially.collect()
             }).collect()   
@@ -42,10 +44,10 @@ impl Game {
         }
     }
 
-    pub fn reset(&mut self,rule: RuleSet) {
+    pub fn reset(&mut self) {
         let mut rng = rand::thread_rng();
 
-        let mut grid:Vec<Vec<Vec<bool>>> = (0..self.cell_count).map(|_| {
+        let grid:Vec<Vec<Vec<bool>>> = (0..self.cell_count).map(|_| {
             (0..self.cell_count).map(|_| {
                 (0..self.cell_count).map(|_| rng.gen_bool(self.prob)).collect() 
             }).collect()   
@@ -54,7 +56,6 @@ impl Game {
         self.grid = grid;
         self.generation = 0;
         self.first_disp = true;
-        self.rule = rule;
     }
 
     pub fn advance_state(&mut self) {
@@ -129,7 +130,10 @@ impl Game {
             if count == 5 {g[x][y][z] = true; }
         }
     }
-        
+    
+    // todo: create more mode/rules for interesting structures/distributions
+    // these will not generate the grid randomly but rather place patterns into it 
+    // and overwrite/insert custom rules
 
 
     pub fn count_neighbors(&mut self, x:usize,y:usize,z:usize ) -> usize {
