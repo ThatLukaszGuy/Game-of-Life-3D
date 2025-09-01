@@ -13,8 +13,9 @@ use game::RuleSet;
 
 // for simple experimenting bind all to easily findable constants - default values
 const PROB: f64 = 0.05;
-const SIZE: usize = 50; // above 64 laggy
+const SIZE: usize = 64; // above 64 laggy
 const RULE: RuleSet = RuleSet::Sparse;
+const SPEED:f32 = 2.;
 
 fn main() {
     let mut app = App::new();
@@ -39,6 +40,7 @@ fn main() {
 
     // when entering the game spawn game camera etc
     app.add_systems(OnEnter(AppState::InGame), (
+        setup_pause,
         spawn_camera,
         spawn_light,
         setup_game.before(spawn_camera),
@@ -49,6 +51,7 @@ fn main() {
 
     app.add_systems(Update, (
         camera_look,
+        camera_move.after(camera_look),
         spawn_cube,
         focus_events,
         toggle_grab.run_if(input_just_released(KeyCode::Escape)),
@@ -155,7 +158,12 @@ fn place_cubes(
     mut spawner: EventWriter<CubeSpawn>,
     mut game: ResMut<Game>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut paused: ResMut<Paused>,
+    mut observer: Single<&mut Transform, With<Observer>>
 ){
+
+    // todo: Space to stop/resume simulation
+
     // intial render after which game_step function takes over
     if game.first_disp {     
 
@@ -175,7 +183,15 @@ fn place_cubes(
 
     // reset game
     if keys.just_pressed(KeyCode::KeyR) {
+        let mid = game.grid.len() as f32 /2.;
         game.reset();
+        **observer = Transform::from_xyz(mid, mid, 3.0 * mid)
+        .looking_at(Vec3::new(mid, mid, mid), Vec3::Y);
+    }
+
+    // listen for pause
+    if keys.just_pressed(KeyCode::Space) {
+        paused.0 = !paused.0;
     }
 
     // generation counter - needs to be rerendered per generation and/or on reset
@@ -258,6 +274,7 @@ fn camera_look(
     if !window.focused {
         return;
     }
+
     // change to use 100. divided by min width and hight, this will make the looking around feel same on different resolutions
     let sensitivity = 75. / window.width().min(window.height());
 
@@ -274,6 +291,40 @@ fn camera_look(
 
     // recalculate the Quat from the yaw and pitch, yaw first or end up with unintended role
     observer.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.);
+
+}
+
+// move 3d camera if state is paused - move speed should depend on size of the simulation
+// as original placement of camera is also dependent on size
+fn camera_move(
+    mut observer: Single<&mut Transform, With<Observer>>,
+    inputs: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    paused: Res<Paused>,
+) {
+    if !paused.0 {
+        return; // early exit if NOT paused
+    }
+
+    let cam_speed = SIZE as f32 / 3.;
+    let mut delta = Vec3::ZERO;
+    if inputs.pressed(KeyCode::KeyA) {
+        delta.x -= cam_speed;
+    }
+    if inputs.pressed(KeyCode::KeyD) {
+        delta.x += cam_speed;
+    }
+    if inputs.pressed(KeyCode::KeyW) {
+        delta.z += cam_speed;
+    }
+    if inputs.pressed(KeyCode::KeyS) {
+        delta.z -= cam_speed;
+    }
+
+    let forward = observer.forward().as_vec3() * delta.z;
+    let left = observer.right().as_vec3() * delta.x;
+    let to_move = forward + left;
+    observer.translation += to_move * time.delta_secs() * SPEED;
 }
 
 
@@ -283,7 +334,15 @@ fn camera_look(
 struct StepTimer(Timer);
 
 fn setup_timer(mut commands: Commands) {
-    commands.insert_resource(StepTimer(Timer::from_seconds(0.7, TimerMode::Repeating)));
+    commands.insert_resource(StepTimer(Timer::from_seconds(1. / SPEED, TimerMode::Repeating)));
+}
+
+// pause logic
+#[derive(Resource)]
+struct Paused(bool);
+
+fn setup_pause(mut commands: Commands) {
+    commands.insert_resource(Paused(false));
 }
 
 fn setup_game(mut commands: Commands, selected: Res<SelectedRule>) {
@@ -297,10 +356,17 @@ fn game_step(
     mut game: ResMut<Game>,
     mut spawner: EventWriter<CubeSpawn>,
     query: Query<Entity, With<LifeCube>>,
-    mut commands: Commands
+    mut commands: Commands,
+    paused: Res<Paused>,
 ) {
+
+    if paused.0 {
+        return; // early exit if paused
+    }
+
     if timer.0.tick(time.delta()).just_finished() {
         
+
         // only run steps after the initial display
         if !game.first_disp {
             // advance state
@@ -445,7 +511,7 @@ fn setup_menu(
                     });
 
             parent.spawn((
-                Text::new(format!("Will start automatically after choosing Mode\nSpawn probability at {}, \nSize per dimension {}\nconfigurable by altering constants at the top of the file\n\nPress: \n'Esc' to (un)focus\n'R' to reset", {PROB}, {SIZE})),
+                Text::new(format!("Will start automatically after choosing Mode\nSpawn probability at {}, \nSize per dimension {}\nTick Speed per Generation at {}\nAll configurable by altering constants at the top of the main.rs file\n\nPress: \n'Esc' to (un)focus\n'R' to reset\n'Space' to pause simulation\nWhen Paused - can move around with WASD keys", {PROB}, {SIZE}, {SPEED})),
                 TextFont {
                     font_size: 20.0,
                     ..default()
