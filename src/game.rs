@@ -7,7 +7,7 @@ pub enum RuleSet {
     Dense,
     Sparse,
     Chaotic,
-    NoDeath
+    NoDeath,
 }
 
 #[derive(Resource)]
@@ -24,15 +24,15 @@ impl Game {
 
     pub fn new(size: usize, prob:f64, rule: RuleSet) -> Game {
         let mut cell_count = 0;
-        let mut rng = rand::thread_rng();
 
         if size < 16 { cell_count = 16; } 
         else { cell_count = size; } 
-        let grid:Vec<Vec<Vec<bool>>> = (0..cell_count).map(|_| {
-            (0..cell_count).map(|_| {
-                (0..cell_count).map(|_| rng.gen_bool(prob)).collect() // Prob% chance true/false as alive cells should be rarer initially.collect()
-            }).collect()   
-        }).collect();
+
+
+        // if rule matches specific structure - i.e. specific generated pattern - else randomize
+        let grid:Vec<Vec<Vec<bool>>> = match rule {
+            _ => Game::randomize(prob, cell_count)
+        };
 
         Game {
             grid,
@@ -42,6 +42,16 @@ impl Game {
             prob,
             rule
         }
+    }
+
+    pub fn randomize(prob:f64,cell_count:usize) -> Vec<Vec<Vec<bool>>> {
+        let mut rng = rand::thread_rng();
+        let grid:Vec<Vec<Vec<bool>>> = (0..cell_count).map(|_| {
+            (0..cell_count).map(|_| {
+                (0..cell_count).map(|_| rng.gen_bool(prob)).collect() // Prob% chance true/false as alive cells should be rarer initially.collect()
+            }).collect()   
+        }).collect();
+        grid
     }
 
     pub fn reset(&mut self) {
@@ -78,7 +88,7 @@ impl Game {
                         RuleSet::Sparse => self.sparse(count, &mut new_grid, x,y,z),
                         RuleSet::Dense => self.dense(count, &mut new_grid, x,y,z),
                         RuleSet::Chaotic => self.chaotic(count, &mut new_grid, x,y,z),
-                        RuleSet::NoDeath => self.no_death(count, &mut new_grid, x,y,z)
+                        RuleSet::NoDeath => self.no_death(count, &mut new_grid, x,y,z),
                     }
                     
                 }
@@ -131,9 +141,14 @@ impl Game {
         }
     }
     
-    // todo: create more mode/rules for interesting structures/distributions
+    // create more mode/rules for interesting structures/distributions
     // these will not generate the grid randomly but rather place patterns into it 
     // and overwrite/insert custom rules
+
+    // Rule Set - recommended 96x96x96
+
+
+
 
 
     pub fn count_neighbors(&mut self, x:usize,y:usize,z:usize ) -> usize {
