@@ -35,31 +35,34 @@ fn main() {
     app.add_systems(Update, ( 
         rule_buttons_interactions.run_if(in_state(AppState::Menu)) 
     ));
+
     // despawn menu camera/UI when leaving Menu
     app.add_systems(OnExit(AppState::Menu), despawn_menu);
 
     // when entering the game spawn game camera etc
     app.add_systems(OnEnter(AppState::InGame), (
+        setup_counter,
         setup_pause,
         spawn_camera,
+        spawn_all_cells.after(setup_game),
         spawn_light,
         setup_game.before(spawn_camera),
         setup_timer
     ));
+
     // despawn game camera/UI when leaving InGame (optional but clean)
     app.add_systems(OnExit(AppState::InGame), despawn_game_camera);
 
     app.add_systems(Update, (
+        update_generation_counter,
         camera_look,
         camera_move.after(camera_look),
-        spawn_cube,
         focus_events,
         toggle_grab.run_if(input_just_released(KeyCode::Escape)),
-        place_cubes.before(spawn_cube),
-        game_step.before(spawn_cube)
+        place_cubes,
+        game_step
     ).run_if(in_state(AppState::InGame)));
 
-    app.add_event::<CubeSpawn>();
     app.init_resource::<CubeData>();
     app.insert_resource(ClearColor(Color::srgb(0.82353, 0.66667, 0.94902))); //210., 170., 242.
     app.add_observer(apply_grab);
@@ -98,8 +101,102 @@ fn despawn_game_camera(mut commands: Commands, cams: Query<Entity, With<GameCame
     }
 }
 
+// Generation counter
 
-// Cube spawning logic and pipeline of placing, generating cubes and setting all their properties
+#[derive(Component)]
+struct GenerationText;
+
+fn setup_counter(mut commands: Commands) {
+    commands.spawn((
+        Text::new("\n  Generation: 0"),
+        TextFont {
+            font_size: 20.0,
+            ..default()
+        },
+        TextColor(WHITE.into()),
+        GenerationText,
+    ));
+}
+
+fn update_generation_counter(
+    game: Res<Game>,
+    mut query: Query<&mut Text, With<GenerationText>>,
+) {
+    // skip if generation hasn't advanced
+    if !game.is_changed() {
+        return; 
+    }
+
+    for mut text in &mut query {
+        *text = Text::new(format!("\n  Generation: {}", game.generation));
+    }
+}
+
+
+// Cube spawning logic and pipeline of placing, generating cubes and setting all their properties 
+// Now using visibility flags instead of re/de - spawning each cube per tick
+
+// new component for mapping a spawned entity to a grid cell 
+#[derive(Component)]
+struct CubeCell {
+    x: usize,
+    y: usize,
+    z: usize,
+}
+
+// Resource that stores the flat-indexed list of pre-spawned entities
+#[derive(Resource)]
+struct CellEntities {
+    entities: Vec<Entity>,
+    size: usize,
+}
+
+// Initial render of the cubes - more expensive in gen. 0 - never run after 
+fn spawn_all_cells(
+    mut commands: Commands,
+    cube_data: Res<CubeData>,
+    maybe_cells: Option<Res<CellEntities>>, // look if it already exists
+) {
+    // If already spawned  - e.g. re-entering => skip
+    if maybe_cells.is_some() {
+        return;
+    }
+
+    let mut entities: Vec<Entity> = Vec::with_capacity(SIZE*SIZE*SIZE);
+
+    for x in 0..SIZE {
+        for y in 0..SIZE {
+            for z in 0..SIZE {
+                let pos = Vec3::new(x as f32, y as f32, -(z as f32));
+                let ent = commands
+                    .spawn((
+                        Transform::from_translation(pos),
+                        Mesh3d(cube_data.mesh()),
+                        MeshMaterial3d(cube_data.material()),
+                        LifeCube,
+                        CubeCell { x, y, z },
+                        Visibility::Hidden,
+                    ))
+                    .id();
+                entities.push(ent);
+            }
+        }
+    }
+
+    commands.insert_resource(CellEntities {
+        entities,
+        size: SIZE,
+    });
+
+}
+
+// helper to compute linear index = x * n*n + y * n + z
+#[inline]
+fn linear_index(x: usize, y: usize, z: usize, n: usize) -> usize {
+    x * n * n + y * n + z
+}
+
+
 
 // generator for both reusing resource for spawning the cubes
 // assigns semi-random color to it and is made in a resuable way
@@ -148,37 +245,43 @@ impl FromWorld for CubeData {
 #[derive(Component)]
 struct LifeCube;
 
-#[derive(Event)]
-struct CubeSpawn {
-    position: Vec3,
-}
-
 fn place_cubes(
     mut commands: Commands,
-    mut spawner: EventWriter<CubeSpawn>,
     mut game: ResMut<Game>,
     keys: Res<ButtonInput<KeyCode>>,
     mut paused: ResMut<Paused>,
-    mut observer: Single<&mut Transform, With<Observer>>
+    mut observer: Single<&mut Transform, With<Observer>>,
+    cell_entities: Option<Res<CellEntities>>,
 ){
 
-    // todo: Space to stop/resume simulation
-
     // intial render after which game_step function takes over
-    if game.first_disp {     
+    if game.first_disp {
+        if let Some(cells) = cell_entities.as_ref() {
+            let n = cells.size;
+            for x in 0..n {
+                for y in 0..n {
+                    for z in 0..n {
+                        // new update system to toggle visibility - i.e. intial render is heavier as it generates
+                        // SIZE^3 cubes but subsequent ticks/generations are cheaper as they're only flag triggers
 
-        for x in 0..game.grid.len() {
-            for y in 0..game.grid.len() {
-                for z in 0..game.grid.len() {
-                    if game.grid[x][y][z] {
-                        spawner.write(CubeSpawn {
-                            position: Vec3::new(x as f32, y as f32, z as f32 * -1.),
-                        });
+                        if game.grid[x][y][z] {
+                            let idx = linear_index(x, y, z, n);
+                            let ent = cells.entities[idx];
+                            // show alive cells
+                            commands.entity(ent).insert(Visibility::Visible);
+                        } else {
+                            // ensure dead cells are hidden - they were created hidden but safe to set
+                            let idx = linear_index(x, y, z, n);
+                            let ent = cells.entities[idx];
+                            commands.entity(ent).insert(Visibility::Hidden);
+                        }
                     }
                 }
             }
-        }
-        game.first_disp = false;
+
+            game.first_disp = false;
+        } 
+
     }
 
     // reset game
@@ -187,6 +290,26 @@ fn place_cubes(
         game.reset();
         **observer = Transform::from_xyz(mid, mid, 3.0 * mid)
         .looking_at(Vec3::new(mid, mid, mid), Vec3::Y);
+
+
+        // hide/show entities according to the reset state
+        if let Some(cells) = cell_entities.as_ref() {
+            let n = cells.size;
+            for x in 0..n {
+                for y in 0..n {
+                    for z in 0..n {
+                        let idx = linear_index(x, y, z, n);
+                        let ent = cells.entities[idx];
+                        if game.grid[x][y][z] {
+                            commands.entity(ent).insert(Visibility::Visible);
+                        } else {
+                            commands.entity(ent).insert(Visibility::Hidden);
+                        }
+                    }
+                }
+            }
+        }
+
     }
 
     // listen for pause
@@ -194,35 +317,7 @@ fn place_cubes(
         paused.0 = !paused.0;
     }
 
-    // generation counter - needs to be rerendered per generation and/or on reset
-    commands.spawn((
-        Text::new(format!("\n  Generation: {}", game.generation)),
-        TextFont {
-            font_size: 20.0,
-            ..default()
-        },
-        
-        TextColor(WHITE.into()),
-        LifeCube
-    ));
 }
-
-// spawner func, each rendered cube is tagged 
-fn spawn_cube(
-    mut events: EventReader<CubeSpawn>,
-    mut commands: Commands,
-    cube_data: Res<CubeData>,
-) {
-    for spawn in events.read() {
-        commands.spawn((
-            Transform::from_translation(spawn.position),
-            Mesh3d(cube_data.mesh()),
-            MeshMaterial3d(cube_data.material()),
-            LifeCube,  
-        ));
-    }
-}
-
 
 // Observer/Camera logic and positioning
 
@@ -270,13 +365,15 @@ fn camera_look(
     mouse_movement: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
     window: Single<&Window, With<PrimaryWindow>>,
+    game: Res<Game>
 ) {
-    if !window.focused {
+    // also lock during first/initial load which will prevent camera sometimes spasming/lagging to the side
+    if !window.focused || game.first_disp  {
         return;
     }
 
-    // change to use 100. divided by min width and hight, this will make the looking around feel same on different resolutions
-    let sensitivity = 75. / window.width().min(window.height());
+    // change to use x. divided by min width and hight, this will make the looking around feel same on different resolutions
+    let sensitivity = 50. / window.width().min(window.height());
 
     // get angles as euler angles because they are more natural then Quats
     let (mut yaw, mut pitch, _) = observer.rotation.to_euler(EulerRot::YXZ);
@@ -354,10 +451,9 @@ fn game_step(
     time: Res<Time>,
     mut timer: ResMut<StepTimer>,
     mut game: ResMut<Game>,
-    mut spawner: EventWriter<CubeSpawn>,
-    query: Query<Entity, With<LifeCube>>,
     mut commands: Commands,
     paused: Res<Paused>,
+    cell_entities: Option<Res<CellEntities>>
 ) {
 
     if paused.0 {
@@ -369,30 +465,28 @@ fn game_step(
 
         // only run steps after the initial display
         if !game.first_disp {
-            // advance state
             game.advance_state();
 
-            // despawn previous visual cubes
-            for entity in query.iter() {
-                commands.entity(entity).despawn();
-            }
-
-            // emit spawn events for the new generation (spawn_cube will run after this system)
-            for x in 0..game.grid.len() {
-                for y in 0..game.grid.len() {
-                    for z in 0..game.grid.len() {
-                        if game.grid[x][y][z] {
-                            spawner.write(CubeSpawn {
-                                position: Vec3::new(x as f32, y as f32, z as f32 * -1.),
-                            });
+            // update visuals using pre-spawned entities - just flag switch
+            if let Some(cells) = cell_entities.as_ref() {
+                let n = cells.size;
+                for x in 0..n {
+                    for y in 0..n {
+                        for z in 0..n {
+                            let idx = linear_index(x, y, z, n);
+                            let ent = cells.entities[idx];
+                            if game.grid[x][y][z] {
+                                commands.entity(ent).insert(Visibility::Visible);
+                            } else {
+                                commands.entity(ent).insert(Visibility::Hidden);
+                            }
                         }
                     }
                 }
-            }
+            } 
+        
         }
 
-
-        
     }
 }
 
