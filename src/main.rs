@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bevy::{
     color::palettes::{css::WHITE, tailwind::{ GRAY_200, PURPLE_300, PURPLE_500, PURPLE_600}}, 
     input::{common_conditions::input_just_released, mouse::AccumulatedMouseMotion},
@@ -15,7 +17,7 @@ use game::RuleSet;
 const PROB: f64 = 0.05;
 const SIZE: usize = 64; // above 64 laggy
 const RULE: RuleSet = RuleSet::Sparse;
-const SPEED:f32 = 2.;
+const SPEED:f32 = 1.;
 
 fn main() {
     let mut app = App::new();
@@ -33,7 +35,7 @@ fn main() {
     // menu tweak
     app.add_systems(OnEnter(AppState::Menu), setup_menu);
     app.add_systems(Update, ( 
-        rule_buttons_interactions.run_if(in_state(AppState::Menu)) 
+        rule_buttons_interactions.run_if(in_state(AppState::Menu)),
     ));
 
     // despawn menu camera/UI when leaving Menu
@@ -41,26 +43,31 @@ fn main() {
 
     // when entering the game spawn game camera etc
     app.add_systems(OnEnter(AppState::InGame), (
-        setup_counter,
+        setup_simulation_state_counter,
         setup_pause,
         spawn_camera,
         spawn_all_cells.after(setup_game),
         spawn_light,
         setup_game.before(spawn_camera),
-        setup_timer
+        setup_timer.after(setup_game)
     ));
 
-    // despawn game camera/UI when leaving InGame (optional but clean)
-    app.add_systems(OnExit(AppState::InGame), despawn_game_camera);
+    // despawn game camera/light/state when leaving InGame (on 'Q')
+    app.add_systems(OnExit(AppState::InGame), (
+        despawn_game_camera, 
+        despawn_simulation_state,
+        despawn_lighting
+    ));
 
     app.add_systems(Update, (
-        update_generation_counter,
+        update_simulation_state_counter,
         camera_look,
         camera_move.after(camera_look),
         focus_events,
         toggle_grab.run_if(input_just_released(KeyCode::Escape)),
         place_cubes,
-        game_step
+        game_step,
+        key_input_listener
     ).run_if(in_state(AppState::InGame)));
 
     app.init_resource::<CubeData>();
@@ -69,7 +76,7 @@ fn main() {
     app.run();
 }
 
-// Camera switch from UI -> Simul.
+// Defined Game states
 #[derive(States, Clone, Eq, PartialEq, Debug, Hash, Default)]
 enum AppState {
     #[default]
@@ -77,61 +84,43 @@ enum AppState {
     InGame,
 }
 
+// State counter - spawn , update , despawn
 #[derive(Component)]
-struct MenuCamera;
+struct InGameText;
 
-#[derive(Component)]
-struct MenuUI;
-
-#[derive(Component)]
-struct GameCamera;
-
-fn despawn_menu(mut commands: Commands, cameras: Query<Entity, With<MenuCamera>>, uis: Query<Entity, With<MenuUI>>) {
-    for cam in cameras.iter() {
-        commands.entity(cam).despawn();
-    }
-    for ui in uis.iter() {
-        commands.entity(ui).despawn();
-    }
-}
-
-fn despawn_game_camera(mut commands: Commands, cams: Query<Entity, With<GameCamera>>) {
-    for cam in cams.iter() {
-        commands.entity(cam).despawn();
-    }
-}
-
-// Generation counter
-
-#[derive(Component)]
-struct GenerationText;
-
-fn setup_counter(mut commands: Commands) {
+fn setup_simulation_state_counter(mut commands: Commands) {
     commands.spawn((
-        Text::new("\n  Generation: 0"),
+        Text::new(format!("\n  Generation: 0\n  Speed: {}",1./SPEED)),
         TextFont {
             font_size: 20.0,
             ..default()
         },
         TextColor(WHITE.into()),
-        GenerationText,
+        InGameText,
     ));
 }
 
-fn update_generation_counter(
+fn update_simulation_state_counter(
     game: Res<Game>,
-    mut query: Query<&mut Text, With<GenerationText>>,
+    mut query: Query<&mut Text, With<InGameText>>,
+    timer: Res<StepTimer>,
 ) {
     // skip if generation hasn't advanced
-    if !game.is_changed() {
+    if !game.is_changed(){
         return; 
     }
 
     for mut text in &mut query {
-        *text = Text::new(format!("\n  Generation: {}", game.generation));
+        *text = Text::new(format!("\n  Generation: {}\n  Speed: {:.2}", game.generation,1./ timer.0.duration().as_secs_f32()));
     }
 }
 
+fn despawn_simulation_state(mut commands: Commands,query: Query<Entity, With<InGameText>>) {
+    for text in query.iter() {
+        commands.entity(text).despawn();
+    }
+
+}
 
 // Cube spawning logic and pipeline of placing, generating cubes and setting all their properties 
 // Now using visibility flags instead of re/de - spawning each cube per tick
@@ -196,8 +185,6 @@ fn linear_index(x: usize, y: usize, z: usize, n: usize) -> usize {
     x * n * n + y * n + z
 }
 
-
-
 // generator for both reusing resource for spawning the cubes
 // assigns semi-random color to it and is made in a resuable way
 #[derive(Resource)]
@@ -249,7 +236,6 @@ fn place_cubes(
     mut commands: Commands,
     mut game: ResMut<Game>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut paused: ResMut<Paused>,
     mut observer: Single<&mut Transform, With<Observer>>,
     cell_entities: Option<Res<CellEntities>>,
 ){
@@ -312,52 +298,67 @@ fn place_cubes(
 
     }
 
+}
+
+// Keyinputs to manipulate during simulation
+fn key_input_listener(   
+    mut game: ResMut<Game>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut paused: ResMut<Paused>,
+    mut timer: ResMut<StepTimer>,
+    mut next_state: ResMut<NextState<AppState>>
+) {
+    
     // listen for pause
     if keys.just_pressed(KeyCode::Space) {
         paused.0 = !paused.0;
     }
 
+    // increases/decreases simulation speed 
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        let current = timer.0.duration().as_secs_f32();
+        let new_duration = (current * 0.5).max(game.speed * 0.1); // clamp so it doesn't hit 0
+        timer.0.set_duration(Duration::from_secs_f32(new_duration));
+    }
+
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        let current = timer.0.duration().as_secs_f32();
+        let new_duration = (current * 2.0).min(game.speed * 6.1);
+        timer.0.set_duration(Duration::from_secs_f32(new_duration));
+    }
+
+    // go back to menu
+    if keys.just_pressed(KeyCode::KeyQ) { 
+        game.generation = 0;
+        game.reset();
+        next_state.set(AppState::Menu);
+    }
 }
 
-// Observer/Camera logic and positioning
 
+// Observer/Camera logic, positioning, spawning, despawning
 #[derive(Component)]
 struct Observer;
 
 fn spawn_camera(mut commands: Commands, game: Res<Game>) {
 
     // have camera look roughly at middle of cube structure
+    // and be positioned infront of center of cube (with some distance)
 
     let mid = game.grid.len() as f32 /2.;
-    println!("{}",mid);
+    
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(mid, mid, 3.*mid)  
             .looking_at(Vec3::from_array([mid,mid,mid]), Vec3::Y), 
         Observer,
-        GameCamera
     ));
 }
 
-fn spawn_light(mut commands: Commands) {
-        
-        commands.spawn((
-            DirectionalLight {
-                shadows_enabled: true,
-                illuminance: 10000.0,
-                ..default()
-            },
-            // Tilt light
-            Transform::from_rotation(
-                Quat::from_euler(EulerRot::XYZ, -std::f32::consts::FRAC_PI_4, std::f32::consts::FRAC_PI_4, 0.0)
-            )
-        ));
-    
-        commands.insert_resource(AmbientLight {
-            color: Color::WHITE,
-            brightness: 200.0,
-            affects_lightmapped_meshes: true
-        });
+fn despawn_game_camera(mut commands: Commands, cams: Query<Entity, With<Observer>>) {
+    for cam in cams.iter() {
+        commands.entity(cam).despawn();
+    }
 }
 
 fn camera_look(    
@@ -367,8 +368,8 @@ fn camera_look(
     window: Single<&Window, With<PrimaryWindow>>,
     game: Res<Game>
 ) {
-    // also lock during first/initial load which will prevent camera sometimes spasming/lagging to the side
-    if !window.focused || game.first_disp  {
+    // also lock during intial load and one gen. which will prevent camera sometimes spasming/lagging to the side
+    if !window.focused || game.generation <= 2  {
         return;
     }
 
@@ -424,17 +425,46 @@ fn camera_move(
     observer.translation += to_move * time.delta_secs() * SPEED;
 }
 
+// Scene Lighting spawn, despawn
+#[derive(Component)]
+struct Lighting;
+
+fn spawn_light(mut commands: Commands) {
+        
+        commands.spawn((
+            DirectionalLight {
+                shadows_enabled: true,
+                illuminance: 10000.0,
+                ..default()
+            },
+            // Tilt light
+            Transform::from_rotation(
+                Quat::from_euler(EulerRot::XYZ, -std::f32::consts::FRAC_PI_4, std::f32::consts::FRAC_PI_4, 0.0)
+            ),
+            Lighting
+        ));
+    
+}
+
+fn despawn_lighting(mut commands: Commands, light: Query<Entity, With<Lighting>>) {
+    for l in light.iter() {
+        commands.entity(l).despawn();
+    }
+}
 
 // Timer and Game state transition logic
 
 #[derive(Resource)]
 struct StepTimer(Timer);
 
-fn setup_timer(mut commands: Commands) {
-    commands.insert_resource(StepTimer(Timer::from_seconds(1. / SPEED, TimerMode::Repeating)));
+fn setup_timer(
+    mut commands: Commands,
+    game: Res<Game>
+) {
+    commands.insert_resource(StepTimer(Timer::from_seconds(game.speed, TimerMode::Repeating)));
 }
 
-// pause logic
+// Pause logic
 #[derive(Resource)]
 struct Paused(bool);
 
@@ -442,8 +472,10 @@ fn setup_pause(mut commands: Commands) {
     commands.insert_resource(Paused(false));
 }
 
+// Game Transition
+
 fn setup_game(mut commands: Commands, selected: Res<SelectedRule>) {
-    let game = Game::new(SIZE, PROB, selected.0);
+    let game = Game::new(SIZE, PROB, selected.0, 1. / SPEED);
     commands.insert_resource(game);
 }
 
@@ -519,7 +551,13 @@ fn toggle_grab(mut window: Single<&mut Window, With<PrimaryWindow>>, mut command
     commands.trigger(GrabEvent(window.focused));
 }
 
-// UI Text, Button Select and state transition config
+// UI Text, Button Select and state transition config spawn, despawn
+
+#[derive(Component)]
+struct MenuCamera;
+
+#[derive(Component)]
+struct MenuUI;
 
 fn setup_menu(
     mut commands: Commands, 
@@ -605,7 +643,7 @@ fn setup_menu(
                     });
 
             parent.spawn((
-                Text::new(format!("Will start automatically after choosing Mode\nSpawn probability at {}, \nSize per dimension {}\nTick Speed per Generation at {}\nAll configurable by altering constants at the top of the main.rs file\n\nPress: \n'Esc' to (un)focus\n'R' to reset\n'Space' to pause simulation\nWhen Paused - can move around with WASD keys", {PROB}, {SIZE}, {SPEED})),
+                Text::new(format!("Will start automatically after choosing Mode\nSpawn probability at {}, \nSize per dimension {}\nTick Speed per Generation at {}\nAll configurable by altering constants at the top of the main.rs file\n\nPress: \n'Esc' to (un)focus\n'R' to reset\n'<-' '->' use arrow keys to adjust speed\n'Q' to go back to menu\n'Space' to pause simulation\nWhen Paused - can move around with WASD keys", {PROB}, {SIZE}, {SPEED})),
                 TextFont {
                     font_size: 20.0,
                     ..default()
@@ -654,3 +692,11 @@ fn rule_buttons_interactions(
     }
 }
 
+fn despawn_menu(mut commands: Commands, cameras: Query<Entity, With<MenuCamera>>, uis: Query<Entity, With<MenuUI>>) {
+    for cam in cameras.iter() {
+        commands.entity(cam).despawn();
+    }
+    for ui in uis.iter() {
+        commands.entity(ui).despawn();
+    }
+}

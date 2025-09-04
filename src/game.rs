@@ -17,12 +17,13 @@ pub struct Game {
     pub first_disp: bool,
     pub cell_count: usize ,// per dim i.e. for cc = 16 => 16x16x16
     pub prob: f64,
-    pub rule: RuleSet
+    pub rule: RuleSet,
+    pub speed: f32
 }
 // todo : add "custom config" variations that allow spawning in specific structures rather than random generation
 impl Game {
 
-    pub fn new(size: usize, prob:f64, rule: RuleSet) -> Game {
+    pub fn new(size: usize, prob:f64, rule: RuleSet, speed: f32) -> Game {
         let mut cell_count = 0;
 
         if size < 16 { cell_count = 16; } 
@@ -40,7 +41,8 @@ impl Game {
             first_disp: true,
             cell_count,
             prob,
-            rule
+            rule,
+            speed
         }
     }
 
