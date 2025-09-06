@@ -9,13 +9,14 @@ use bevy::{
 };
 
 pub mod game;
+pub mod rules;
 
 use game::Game;
-use game::RuleSet;
+use rules::RuleSet;
 
 // for simple experimenting bind all to easily findable constants - default values
-const PROB: f64 = 0.05;
-const SIZE: usize = 64; // above 64 laggy
+const PROB: f32 = 0.25;
+const SIZE: isize = 64; // above 64 laggy
 const RULE: RuleSet = RuleSet::Sparse;
 const SPEED:f32 = 1.;
 
@@ -31,11 +32,16 @@ fn main() {
 
     app.init_state::<AppState>();
     app.insert_resource(SelectedRule(RULE));
-    
-    // menu tweak
+    app.insert_resource(SelectedProb(PROB));
+    app.insert_resource(SelectedSize(SIZE));
+
+    // menu tweak and choice options
     app.add_systems(OnEnter(AppState::Menu), setup_menu);
     app.add_systems(Update, ( 
+        exit_app.run_if(in_state(AppState::Menu)),
         rule_buttons_interactions.run_if(in_state(AppState::Menu)),
+        prob_buttons_interactions.run_if(in_state(AppState::Menu)),
+        size_buttons_interactions.run_if(in_state(AppState::Menu)),
     ));
 
     // despawn menu camera/UI when leaving Menu
@@ -46,17 +52,21 @@ fn main() {
         setup_simulation_state_counter,
         setup_pause,
         spawn_camera,
+        initial_grab,
         spawn_all_cells.after(setup_game),
         spawn_light,
         setup_game.before(spawn_camera),
         setup_timer.after(setup_game)
     ));
 
-    // despawn game camera/light/state when leaving InGame (on 'Q')
+    // despawn game camera/light/state/systems when leaving InGame (on 'Q')
     app.add_systems(OnExit(AppState::InGame), (
         despawn_game_camera, 
         despawn_simulation_state,
-        despawn_lighting
+        despawn_lighting,
+        despawn_game_resources,
+        despawn_cells,
+        despawn_grab
     ));
 
     app.add_systems(Update, (
@@ -145,17 +155,20 @@ fn spawn_all_cells(
     mut commands: Commands,
     cube_data: Res<CubeData>,
     maybe_cells: Option<Res<CellEntities>>, // look if it already exists
+    game: Res<Game>
 ) {
     // If already spawned  - e.g. re-entering => skip
     if maybe_cells.is_some() {
         return;
     }
 
-    let mut entities: Vec<Entity> = Vec::with_capacity(SIZE*SIZE*SIZE);
+    let initial_size = game.cell_count as usize;
 
-    for x in 0..SIZE {
-        for y in 0..SIZE {
-            for z in 0..SIZE {
+    let mut entities: Vec<Entity> = Vec::with_capacity(initial_size*initial_size*initial_size);
+
+    for x in 0..initial_size {
+        for y in 0..initial_size {
+            for z in 0..initial_size {
                 let pos = Vec3::new(x as f32, y as f32, -(z as f32));
                 let ent = commands
                     .spawn((
@@ -174,7 +187,7 @@ fn spawn_all_cells(
 
     commands.insert_resource(CellEntities {
         entities,
-        size: SIZE,
+        size: initial_size,
     });
 
 }
@@ -300,13 +313,24 @@ fn place_cubes(
 
 }
 
+fn despawn_cells(mut commands: Commands, cells: Option<Res<CellEntities>>) {
+    if let Some(cells) = cells {
+        for ent in &cells.entities {
+            commands.entity(*ent).despawn();
+        }
+        commands.remove_resource::<CellEntities>();
+    }
+}
+
+
 // Keyinputs to manipulate during simulation
 fn key_input_listener(   
     mut game: ResMut<Game>,
     keys: Res<ButtonInput<KeyCode>>,
     mut paused: ResMut<Paused>,
     mut timer: ResMut<StepTimer>,
-    mut next_state: ResMut<NextState<AppState>>
+    mut next_state: ResMut<NextState<AppState>>,
+    mut exit: EventWriter<AppExit>,
 ) {
     
     // listen for pause
@@ -329,9 +353,15 @@ fn key_input_listener(
 
     // go back to menu
     if keys.just_pressed(KeyCode::KeyQ) { 
+        
         game.generation = 0;
         game.reset();
         next_state.set(AppState::Menu);
+    }
+
+    // quit program
+    if keys.just_pressed(KeyCode::KeyX) { 
+        exit.write(AppExit::Success);
     }
 }
 
@@ -369,7 +399,7 @@ fn camera_look(
     game: Res<Game>
 ) {
     // also lock during intial load and one gen. which will prevent camera sometimes spasming/lagging to the side
-    if !window.focused || game.generation <= 2  {
+    if !window.focused || game.first_disp  {
         return;
     }
 
@@ -399,12 +429,13 @@ fn camera_move(
     inputs: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     paused: Res<Paused>,
+    size: Res<SelectedSize>
 ) {
     if !paused.0 {
         return; // early exit if NOT paused
     }
 
-    let cam_speed = SIZE as f32 / 3.;
+    let cam_speed = size.0 as f32 / 3.;
     let mut delta = Vec3::ZERO;
     if inputs.pressed(KeyCode::KeyA) {
         delta.x -= cam_speed;
@@ -474,8 +505,8 @@ fn setup_pause(mut commands: Commands) {
 
 // Game Transition
 
-fn setup_game(mut commands: Commands, selected: Res<SelectedRule>) {
-    let game = Game::new(SIZE, PROB, selected.0, 1. / SPEED);
+fn setup_game(mut commands: Commands, selected_rule: Res<SelectedRule>, selected_prob: Res<SelectedProb>, selected_size: Res<SelectedSize>) {
+    let game = Game::new(selected_size.0 as usize, selected_prob.0, selected_rule.0, 1. / SPEED);
     commands.insert_resource(game);
 }
 
@@ -522,6 +553,15 @@ fn game_step(
     }
 }
 
+// remove all resources on exit
+fn despawn_game_resources(mut commands: Commands) {
+    commands.remove_resource::<Game>();
+    commands.remove_resource::<StepTimer>();
+    commands.remove_resource::<Paused>();
+    
+}
+
+
 // Grab & Focus on Esc key s.t. u can only look iff ur focused
 
 #[derive(Event, Deref)]
@@ -540,6 +580,11 @@ fn apply_grab(
     }
 }
 
+fn initial_grab(mut window: Single<&mut Window, With<PrimaryWindow>>) {
+    window.cursor_options.visible = false;
+    window.cursor_options.grab_mode = CursorGrabMode::Locked;
+}
+
 fn focus_events(mut events: EventReader<WindowFocused>, mut commands: Commands) {
     if let Some(event) = events.read().last() {
         commands.trigger(GrabEvent(event.focused));
@@ -551,7 +596,21 @@ fn toggle_grab(mut window: Single<&mut Window, With<PrimaryWindow>>, mut command
     commands.trigger(GrabEvent(window.focused));
 }
 
+fn despawn_grab(mut window: Single<&mut Window, With<PrimaryWindow>>,) {
+    window.cursor_options.visible = true;
+    window.cursor_options.grab_mode = CursorGrabMode::None;
+}
+
 // UI Text, Button Select and state transition config spawn, despawn
+
+fn exit_app(    
+    keys: Res<ButtonInput<KeyCode>>,
+    mut exit: EventWriter<AppExit>,
+) {
+    if keys.just_pressed(KeyCode::KeyX) { 
+        exit.write(AppExit::Success);
+    }
+}
 
 #[derive(Component)]
 struct MenuCamera;
@@ -561,7 +620,9 @@ struct MenuUI;
 
 fn setup_menu(
     mut commands: Commands, 
-    selected: Option<Res<SelectedRule>>
+    selected_rule: Option<Res<SelectedRule>>,
+    selected_prob: Option<Res<SelectedProb>>,
+    selected_size: Option<Res<SelectedSize>>,
 ) {
     commands.spawn((Camera2d::default(), MenuCamera));
 
@@ -583,7 +644,7 @@ fn setup_menu(
         .with_children(|parent| {
         // add Title + Descriptions
             parent.spawn((
-                Text::new("Choose Simulation Mode"),
+                Text::new(" Choose Simulation Mode "),
                 TextFont {
                     font_size: 40.0,
                     ..default()
@@ -591,15 +652,18 @@ fn setup_menu(
                 TextColor(WHITE.into()),
                 
             ));
-                let current = selected.map(|r| r.0).unwrap_or(RULE);
+                let current = selected_rule.map(|r| r.0).unwrap_or(RULE);
                 parent
                     .spawn(Node {
                         margin: UiRect::top(Val::Px(10.0)),
-                        width: Val::Percent(300.0),
+                        width: Val::Percent(100.0),
                         height: Val::Px(150.0),
                         flex_direction: FlexDirection::Row,
+                        flex_wrap: FlexWrap::Wrap,
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
+                        flex_shrink: 0.2,
+                        flex_grow: 0.,
                         column_gap: Val::Px(8.0),
                         ..default()
                     })
@@ -610,6 +674,11 @@ fn setup_menu(
                             (RuleSet::Sparse, "Sparse"),
                             (RuleSet::Chaotic, "Chaotic"),
                             (RuleSet::NoDeath, "No Death"),
+                            (RuleSet::Tunnel, "Tunnel Like"),
+                            (RuleSet::ClosestTranslation, "Closest Translation - R(5,7,6,6)"),
+                            (RuleSet::ClosestTranslationFixed, "R(5,7,6,6) Stable Barriers Structure & Parallel Universes"),
+                            (RuleSet::Life4555, "Life 4555"),
+                            (RuleSet::Life4555Fixed, "R(4,5,5,5) Crafted Stable Structures "),
                         ];
     
                         for (rule_variant, label) in options {
@@ -623,7 +692,8 @@ fn setup_menu(
                             row.spawn((
                                 Button,
                                 Node {
-                                    padding: UiRect::all(Val::Px(8.0)),
+                                    padding: UiRect::all(Val::Px(5.0)),
+                                    margin:UiRect::all(Val::Px(2.0)) ,                        
                                     ..default()
                                 },
                                 BackgroundColor(bg),
@@ -633,7 +703,7 @@ fn setup_menu(
                                 btn.spawn((
                                     Text::new(label),
                                     TextFont {
-                                        font_size: 30.0,
+                                        font_size: 20.0,
                                         ..default()
                                     },
                                     TextColor(WHITE.into()),
@@ -641,17 +711,112 @@ fn setup_menu(
                             });
                         }
                     });
+                // probability buttons
+                parent
+                    .spawn(Node {
+                        margin: UiRect::top(Val::Px(10.0)),
+                        flex_direction: FlexDirection::Row,
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(8.0),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            Button,
+                            BackgroundColor(PURPLE_600.into()),
+                            ProbButton { delta: -0.05 }, // decrease
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new("-"),
+                                TextFont { font_size: 30.0, ..default() },
+                                TextColor(WHITE.into()),
+                            ));
+                        });
+                
+                        row.spawn((
+                            Text::new(format!("Spawn Probability: {:.2}", selected_prob.unwrap().0 )),
+                            TextFont { font_size: 25.0, ..default() },
+                            TextColor(WHITE.into()),
+                            ProbLabel,
+                        ));
+                
+                        row.spawn((
+                            Button,
+                            BackgroundColor(PURPLE_600.into()),
+                            ProbButton { delta: 0.05 }, // increase
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new("+"),
+                                TextFont { font_size: 30.0, ..default() },
+                                TextColor(WHITE.into()),
+                            ));
+                        });
+                    });
+            
+            // size buttons
+            parent
+            .spawn(Node {
+                margin: UiRect::top(Val::Px(10.0)),
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(8.0),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    Button,
+                    BackgroundColor(PURPLE_600.into()),
+                    SizeButton { delta: -4 }, // decrease
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        Text::new("-"),
+                        TextFont { font_size: 30.0, ..default() },
+                        TextColor(WHITE.into()),
+                    ));
+                });
+        
+                row.spawn((
+                    Text::new(format!("Size per Dimension: {:.2}", selected_size.unwrap().0 )),
+                    TextFont { font_size: 25.0, ..default() },
+                    TextColor(WHITE.into()),
+                    SizeLabel,
+                ));
+        
+                row.spawn((
+                    Button,
+                    BackgroundColor(PURPLE_600.into()),
+                    SizeButton { delta: 4 }, // increase
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        Text::new("+"),
+                        TextFont { font_size: 30.0, ..default() },
+                        TextColor(WHITE.into()),
+                    ));
+                });
+            });
 
+
+            // bottom info text
             parent.spawn((
-                Text::new(format!("Will start automatically after choosing Mode\nSpawn probability at {}, \nSize per dimension {}\nTick Speed per Generation at {}\nAll configurable by altering constants at the top of the main.rs file\n\nPress: \n'Esc' to (un)focus\n'R' to reset\n'<-' '->' use arrow keys to adjust speed\n'Q' to go back to menu\n'Space' to pause simulation\nWhen Paused - can move around with WASD keys", {PROB}, {SIZE}, {SPEED})),
+                Text::new(format!("Will start automatically after choosing Mode\nChosen prob. % and size only apply for non-fixed modes\nRecommended Size: 64\nRecommended Prob: 0.25 OR 0.05\nTick Speed per Generation at {}\n\nPress: \n'Esc' to (un)focus\n'R' to reset\n'<-' '->' use arrow keys to adjust speed\n'Q' to go back to menu\n'Space' to pause simulation\nWhen Paused - can move around with WASD keys\n'X' to exit anytime", {SPEED})),
                 TextFont {
-                    font_size: 20.0,
+                    font_size: 15.0,
+                    
                     ..default()
                 },
                 TextColor(GRAY_200.into()),
             ));
         });
 }
+
+
+// Ruleselection Menu & Choice Logic
 
 #[derive(Resource, Clone, Copy, Debug)]
 struct SelectedRule(pub RuleSet);
@@ -692,6 +857,78 @@ fn rule_buttons_interactions(
     }
 }
 
+// Probability selection Menu & Choice Logic
+
+#[derive(Resource, Clone, Copy, Debug)]
+struct SelectedProb(pub f32);
+
+#[derive(Component)]
+struct ProbButton {
+    delta: f32,
+}
+
+#[derive(Component)]
+struct ProbLabel;
+
+fn prob_buttons_interactions(
+    mut interactions: Query<(&Interaction, &ProbButton, &mut BackgroundColor), Changed<Interaction>>,
+    mut prob: ResMut<SelectedProb>,
+    mut labels: Query<&mut Text, With<ProbLabel>>,
+) {
+    for (interaction, prob_btn, mut bg) in &mut interactions {
+        match *interaction {
+            Interaction::Pressed => {
+                // Clamp probability
+                prob.0 = (prob.0 + prob_btn.delta).clamp(0.0, 1.0);
+                *bg = BackgroundColor(PURPLE_300.into());
+
+                // Update label
+                for mut text in &mut labels {
+                    text.0 = format!("Spawn Probability: {:.2}", prob.0);
+                }
+            }
+            Interaction::Hovered => *bg = BackgroundColor(PURPLE_500.into()),
+            Interaction::None => *bg = BackgroundColor(PURPLE_600.into()),
+        }
+    }
+}
+
+// Size selection Menu & Choice Logic
+#[derive(Resource, Clone, Copy, Debug)]
+struct SelectedSize(pub isize);
+
+#[derive(Component)]
+struct SizeButton {
+    delta: isize,
+}
+
+#[derive(Component)]
+struct SizeLabel;
+
+fn size_buttons_interactions(
+    mut interactions: Query<(&Interaction, &SizeButton, &mut BackgroundColor), Changed<Interaction>>,
+    mut size: ResMut<SelectedSize>,
+    mut labels: Query<&mut Text, With<SizeLabel>>,
+) {
+    for (interaction, size_btn, mut bg) in &mut interactions {
+        match *interaction {
+            Interaction::Pressed => {
+                // Clamp size
+                size.0 = (size.0 + size_btn.delta).clamp(16, 128);
+                *bg = BackgroundColor(PURPLE_300.into());
+
+                // Update label
+                for mut text in &mut labels {
+                    text.0 = format!("Size per dimension: {:.2}", size.0);
+                }
+            }
+            Interaction::Hovered => *bg = BackgroundColor(PURPLE_500.into()),
+            Interaction::None => *bg = BackgroundColor(PURPLE_600.into()),
+        }
+    }
+}
+
+// Despawn Menu s.t. simulation can start
 fn despawn_menu(mut commands: Commands, cameras: Query<Entity, With<MenuCamera>>, uis: Query<Entity, With<MenuUI>>) {
     for cam in cameras.iter() {
         commands.entity(cam).despawn();
