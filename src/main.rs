@@ -51,6 +51,7 @@ fn main() {
     app.add_systems(OnEnter(AppState::InGame), (
         setup_simulation_state_counter,
         setup_pause,
+        setup_hidden_toggle,
         spawn_camera,
         initial_grab,
         spawn_all_cells.after(setup_game),
@@ -114,7 +115,16 @@ fn update_simulation_state_counter(
     game: Res<Game>,
     mut query: Query<&mut Text, With<InGameText>>,
     timer: Res<StepTimer>,
+    hidden: Res<Hidden>
 ) {
+
+    if hidden.0 {
+        for mut text in &mut query {
+            *text = Text::new("");
+        }
+        return;
+    }
+
     // skip if generation hasn't advanced
     if !game.is_changed(){
         return; 
@@ -331,6 +341,7 @@ fn key_input_listener(
     mut timer: ResMut<StepTimer>,
     mut next_state: ResMut<NextState<AppState>>,
     mut exit: EventWriter<AppExit>,
+    mut visible: ResMut<Hidden>
 ) {
     
     // listen for pause
@@ -358,6 +369,11 @@ fn key_input_listener(
         game.reset();
         next_state.set(AppState::Menu);
     }
+
+    if keys.just_pressed(KeyCode::KeyF) { 
+        visible.0 = !visible.0;
+    }
+
 
     // quit program
     if keys.just_pressed(KeyCode::KeyX) { 
@@ -503,6 +519,14 @@ fn setup_pause(mut commands: Commands) {
     commands.insert_resource(Paused(false));
 }
 
+// Visibility logic
+#[derive(Resource)]
+struct Hidden(bool);
+
+fn setup_hidden_toggle(mut commands: Commands) {
+    commands.insert_resource(Hidden(false));
+}
+
 // Game Transition
 
 fn setup_game(mut commands: Commands, selected_rule: Res<SelectedRule>, selected_prob: Res<SelectedProb>, selected_size: Res<SelectedSize>) {
@@ -558,6 +582,7 @@ fn despawn_game_resources(mut commands: Commands) {
     commands.remove_resource::<Game>();
     commands.remove_resource::<StepTimer>();
     commands.remove_resource::<Paused>();
+    commands.remove_resource::<Hidden>();
     
 }
 
@@ -804,7 +829,7 @@ fn setup_menu(
 
             // bottom info text
             parent.spawn((
-                Text::new(format!("Will start automatically after choosing Mode\nChosen prob. % and size only apply for non-fixed modes\nRecommended Size: 64\nRecommended Prob: 0.25 OR 0.05\nTick Speed per Generation at {}\n\nPress: \n'Esc' to (un)focus\n'R' to reset\n'<-' '->' use arrow keys to adjust speed\n'Q' to go back to menu\n'Space' to pause simulation\nWhen Paused - can move around with WASD keys\n'X' to exit anytime", {SPEED})),
+                Text::new(format!("Will start automatically after choosing Mode\nChosen prob. % and size only apply for non-fixed modes\nRecommended Size: 64\nRecommended Prob: 0.25 OR 0.05\nTick Speed per Generation at {}\n\nPress: \n'Esc' to (un)focus\n'R' to reset\n'<-' '->' use arrow keys to adjust speed\n'Q' to go back to menu\n'Space' to pause simulation\nWhen Paused - can move around with WASD keys\n'X' to exit anytime\n'F' hide/show UI during simulation", {SPEED})),
                 TextFont {
                     font_size: 15.0,
                     
